@@ -1,292 +1,373 @@
-// screens/DashboardScreen.js
-import React from 'react';
-import { 
-  View, Text, TouchableOpacity, StyleSheet, ScrollView, 
-  Alert, FlatList, Dimensions, ActivityIndicator 
+import React, { useMemo, useState } from 'react';
+import {
+  View, Text, TouchableOpacity, StyleSheet, ScrollView,
+  ActivityIndicator, RefreshControl, Alert, Modal, Linking
 } from 'react-native';
-import { useNPMS } from '../context/AuthContext'; 
+import { useNPMS } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
-import { 
-  Volume2, LogOut, CheckCircle, XCircle, Users, Speaker, Clock, 
-  User, Phone, Home, Check, X, Mail 
-} from 'lucide-react-native'; 
+import { generateAndPrintReport } from '../lib/ReportGenerator'; // Import the generator
+import {
+  LogOut, Check, X, Bell, ShieldCheck, Phone, MessageSquare, XCircle, Printer
+} from 'lucide-react-native';
 
-const { width } = Dimensions.get('window');
+// --- 1. HELPER FUNCTIONS ---
 
-const COLOR_MAP = {
-  'Solid Green': '#10b981', 
-  'Blinking Yellow': '#fbbf24', 
-  'Blinking Red': '#ef4444', 
+// Normalizer: "Room 2" -> "2"
+const normalizeRoom = (roomString) => {
+    if (!roomString) return 'unknown_room';
+    return roomString.toString().toLowerCase()
+        .replace(/room/g, '').replace(/class/g, '')
+        .replace(/_/g, '').replace(/-/g, '').replace(/\s/g, '').trim();
 };
 
-const formatDuration = (seconds) => {
-  if (seconds > 3600) return "1h+";
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  const minText = minutes > 0 ? `${minutes}m ` : '';
-  const secText = `${remainingSeconds}s`;
-  return minText + secText;
+const isRecentAlert = (createdAt) => {
+    if (!createdAt) return false;
+    const now = new Date();
+    const logTime = new Date(createdAt);
+    return ((now - logTime) / 1000 / 60) < 5; 
 };
 
-// --- Account Request List ---
-const AccountRequestList = ({ pendingUsers, onApprove, onReject, loading }) => {
-  if (pendingUsers.length === 0) {
-    return (
-      <View style={styles.noRequestsContainer}>
-        <CheckCircle size={32} color={COLOR_MAP['Solid Green']} />
-        <Text style={styles.noRequestsText}>No pending account requests.</Text>
-      </View>
-    );
-  }
-
-  const renderItem = ({ item }) => (
-    <View style={styles.requestCard}>
-      <View style={styles.requestDetails}>
-        <Text style={styles.requestName}>
-          <User size={14} color="#1f2937" /> {item.name} ({item.role})
-        </Text>
-        <Text style={styles.requestInfo}>
-          <Mail size={14} color="#6b7280" /> {item.email}
-        </Text>
-        <Text style={styles.requestInfo}>
-          <Home size={14} color="#6b7280" /> Classroom: {item.classroomId || 'N/A'}
-        </Text>
-        <Text style={styles.requestInfo}>
-          <Phone size={14} color="#6b7280" /> Contact: {item.contactNumber || 'N/A'}
-        </Text>
-      </View>
-
-      <View style={styles.requestActions}>
-        <TouchableOpacity 
-          style={styles.approveButton} 
-          onPress={() => onApprove(item.id)}
-          disabled={loading}
-        >
-          <Check size={18} color="white" />
-          <Text style={styles.approveButtonText}>Approve</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={styles.rejectButton} 
-          onPress={() => onReject(item.id)}
-          disabled={loading}
-        >
-          <X size={18} color="white" />
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-
-  return (
-    <View>
-      <Text style={styles.listHeader}>Pending Account Requests ({pendingUsers.length})</Text>
-      <FlatList
-        data={pendingUsers}
-        renderItem={renderItem}
-        keyExtractor={item => item.id}
-        scrollEnabled={false}
-      />
-    </View>
-  );
-};
-
-// --- Faculty Dashboard ---
-const FacultyDashboard = ({ users, onApprove, onReject, systemStatuses, loading }) => {
-  const BREACH_LIMIT = 180; // 3 minutes
+// ==========================================
+// 2. FACULTY VIEW (With Report & Actions)
+// ==========================================
+const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData }) => {
   const pendingUsers = users.filter(u => !u.is_verified);
-  const verifiedUsers = users.filter(u => u.is_verified);
+  
+  // STATE FOR POPUP & PRINTING
+  const [selectedRoom, setSelectedRoom] = useState(null);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
 
-  const rooms = Object.values(systemStatuses || {});
-  const sortedRooms = rooms.sort((a, b) => b.dbLevel - a.dbLevel);
+  // --- OPEN ACTION MENU ---
+  const handleRoomClick = (room) => {
+      setSelectedRoom(room);
+      setModalVisible(true);
+  };
+
+  // --- ACTION: PRINT REPORT ---
+  const handlePrint = async () => {
+    setIsPrinting(true);
+    // We pass 'users' so the report knows the Teacher Names
+    await generateAndPrintReport(users);
+    setIsPrinting(false);
+  };
+
+  // --- ACTION: CALL TEACHER ---
+  const performCall = () => {
+      if (!selectedRoom?.teacher?.phone_num) {
+          Alert.alert("No Number", "This teacher hasn't provided a phone number.");
+          return;
+      }
+      Linking.openURL(`tel:${selectedRoom.teacher.phone_num}`);
+  };
+
+  // --- ACTION: SEND SMS NOTICE ---
+  const performMessage = () => {
+      if (!selectedRoom?.teacher?.phone_num) {
+          Alert.alert("No Number", "This teacher hasn't provided a phone number.");
+          return;
+      }
+      const message = `Notice: High noise levels detected in ${selectedRoom.roomId}. Please manage the class.`;
+      Linking.openURL(`sms:${selectedRoom.teacher.phone_num}?body=${message}`);
+  };
+
+  // --- DATA PROCESSING ---
+  const monitoredRooms = useMemo(() => {
+    const list = [];
+    // 1. Add rooms that have logs
+    Object.values(roomAlerts).forEach(log => {
+        const iotRoomClean = normalizeRoom(log.room_id);
+        const teacher = users.find(u => 
+            u.role === 'Teacher' && normalizeRoom(u.room_num) === iotRoomClean
+        );
+        list.push({
+            roomId: log.room_id,
+            logData: log,
+            teacher: teacher || null,
+            status: isRecentAlert(log.created_at) ? 'NOISE DETECTED' : 'Quiet',
+            isAlert: isRecentAlert(log.created_at)
+        });
+    });
+
+    // 2. Add rooms that have teachers but no logs yet
+    users.forEach(u => {
+        if(u.role === 'Teacher' && u.room_num) {
+            const teacherRoomClean = normalizeRoom(u.room_num);
+            const alreadyExists = list.find(item => normalizeRoom(item.roomId) === teacherRoomClean);
+            if (!alreadyExists) {
+                list.push({ roomId: u.room_num, logData: null, teacher: u, status: 'Quiet', isAlert: false });
+            }
+        }
+    });
+    return list.sort((a, b) => (b.isAlert === a.isAlert) ? 0 : b.isAlert ? 1 : -1);
+  }, [roomAlerts, users]);
 
   return (
-    <ScrollView contentContainerStyle={styles.facultyScrollContainer}>
-      <Text style={styles.roleTitle}>Faculty Dashboard</Text>
-
-      {/* Pending Requests */}
-      <AccountRequestList 
-        pendingUsers={pendingUsers} 
-        onApprove={onApprove} 
-        onReject={onReject}
-        loading={loading}
-      />
-
-      {/* Verified Accounts */}
-      <Text style={styles.listHeader_verified}>
-        Verified Teachers ({verifiedUsers.length})
-      </Text>
-
-      {verifiedUsers.map((user) => (
-        <View key={user.id} style={styles.verifiedCard}>
-          <Text style={styles.verifiedName}>{user.name}</Text>
-          <Text style={styles.verifiedEmail}>{user.email}</Text>
-          <Text style={styles.verifiedRole}>{user.role} • {user.classroomId}</Text>
-        </View>
-      ))}
-
-      {/* Real-time Room Status */}
-      <Text style={styles.listHeader_verified}>Live Classroom Status</Text>
-
-      {sortedRooms.map((room) => {
-        const color = COLOR_MAP[room.led] || '#6b7280';
-        return (
-          <View key={room.classroomId} style={[styles.roomCard, { borderLeftColor: color }]}>
-            <View style={styles.roomHeader}>
-              <Text style={styles.roomTitle}>Classroom {room.classroomId}</Text>
-              <Text style={[styles.roomStatus, { color }]}>{room.status}</Text>
+    <View style={{flex: 1}}>
+        <ScrollView 
+            contentContainerStyle={styles.scrollContainer}
+            refreshControl={<RefreshControl refreshing={false} onRefresh={refreshData} />}
+        >
+        {/* Approvals */}
+        {pendingUsers.length > 0 && (
+            <View style={styles.section}>
+            <Text style={styles.sectionHeader}>Pending Approvals</Text>
+            {pendingUsers.map(item => (
+                <View key={item.id} style={styles.requestCard}>
+                <View style={{flex:1}}>
+                    <Text style={styles.boldText}>{item.name}</Text>
+                    <Text style={styles.subText}>{item.role} • {item.room_num}</Text>
+                </View>
+                <View style={styles.actionRow}>
+                    <TouchableOpacity onPress={() => onApprove(item.id)} style={styles.btnApprove}><Check size={16} color="white"/></TouchableOpacity>
+                    <TouchableOpacity onPress={() => onReject(item.id)} style={styles.btnReject}><X size={16} color="white"/></TouchableOpacity>
+                </View>
+                </View>
+            ))}
             </View>
-            <Text style={styles.dataText}>Noise: {room.dbLevel.toFixed(1)} dB</Text>
-            <Text style={styles.dataText}>Breach: {formatDuration(room.breachDuration)}</Text>
-          </View>
-        );
-      })}
-    </ScrollView>
+        )}
+
+        {/* Room Monitoring Header with Print Button */}
+        <View style={styles.headerRow}>
+            <View>
+                <Text style={styles.sectionHeader}>Room Monitoring</Text>
+                <Text style={styles.subHeader}>Tap a card to take action</Text>
+            </View>
+            
+            <TouchableOpacity 
+                style={styles.printBtn} 
+                onPress={handlePrint}
+                disabled={isPrinting}
+            >
+                {isPrinting ? (
+                    <ActivityIndicator size="small" color="white" />
+                ) : (
+                    <>
+                        <Printer size={18} color="white" style={{marginRight: 6}} />
+                        <Text style={styles.printBtnText}>Report</Text>
+                    </>
+                )}
+            </TouchableOpacity>
+        </View>
+
+        {monitoredRooms.map((room, index) => {
+            const isAlert = room.isAlert;
+            const dbLevel = room.logData ? room.logData.db_level.toFixed(1) : '0.0';
+
+            return (
+            <TouchableOpacity 
+                key={index} 
+                onPress={() => handleRoomClick(room)}
+                activeOpacity={0.7}
+                style={[styles.roomCard, isAlert ? styles.borderRed : styles.borderGreen]}
+            >
+                <View style={styles.roomHeader}>
+                <Text style={styles.roomTitle}>{room.roomId}</Text>
+                <View style={[styles.badge, isAlert ? styles.bgRed : styles.bgGreen]}>
+                    <Text style={styles.badgeText}>{room.status}</Text>
+                </View>
+                </View>
+                <View style={styles.divider} />
+                <View style={styles.roomDetails}>
+                    {room.logData ? (
+                        <Text style={styles.detailText}>Noise Level: <Text style={styles.bold}>{dbLevel} dB</Text></Text>
+                    ) : (
+                        <Text style={[styles.detailText, {fontStyle:'italic', color: '#9ca3af'}]}>No recent noise.</Text>
+                    )}
+                    <View style={[styles.teacherBox, !room.teacher && styles.unassignedBox]}>
+                        <Text style={styles.label}>Assigned Teacher:</Text>
+                        <Text style={styles.teacherName}>{room.teacher ? room.teacher.name : 'Unassigned'}</Text>
+                    </View>
+                </View>
+            </TouchableOpacity>
+            );
+        })}
+        </ScrollView>
+
+        {/* --- 3. THE POPUP MODAL --- */}
+        <Modal
+            animationType="slide"
+            transparent={true}
+            visible={modalVisible}
+            onRequestClose={() => setModalVisible(false)}
+        >
+            <View style={styles.centeredView}>
+                <View style={styles.modalView}>
+                    <View style={styles.modalHeader}>
+                        <Text style={styles.modalTitle}>Manage {selectedRoom?.roomId}</Text>
+                        <TouchableOpacity onPress={() => setModalVisible(false)}>
+                            <XCircle size={24} color="#6b7280" />
+                        </TouchableOpacity>
+                    </View>
+
+                    <Text style={styles.modalStatus}>
+                        Status: <Text style={{fontWeight: 'bold', color: selectedRoom?.isAlert ? '#ef4444' : '#059669'}}>
+                            {selectedRoom?.status}
+                        </Text>
+                    </Text>
+
+                    {selectedRoom?.teacher ? (
+                        <View style={styles.contactContainer}>
+                            <Text style={styles.contactLabel}>Teacher: {selectedRoom.teacher.name}</Text>
+                            <Text style={styles.contactLabel}>Number: {selectedRoom.teacher.phone_num || 'N/A'}</Text>
+                            
+                            <View style={styles.modalBtnRow}>
+                                <TouchableOpacity style={styles.btnCall} onPress={performCall}>
+                                    <Phone size={20} color="white" style={{marginRight: 8}}/>
+                                    <Text style={styles.btnText}>Call</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity style={styles.btnMessage} onPress={performMessage}>
+                                    <MessageSquare size={20} color="white" style={{marginRight: 8}}/>
+                                    <Text style={styles.btnText}>Notice</Text>
+                                </TouchableOpacity>
+                            </View>
+                        </View>
+                    ) : (
+                        <Text style={styles.noTeacherText}>No teacher assigned to this room.</Text>
+                    )}
+                </View>
+            </View>
+        </Modal>
+    </View>
   );
 };
 
-// --- Teacher Dashboard ---
-const TeacherDashboard = ({ user, systemStatuses }) => {
+// ==========================================
+// 4. TEACHER VIEW (Standard)
+// ==========================================
+const TeacherDashboard = ({ user, roomAlerts }) => {
   if (!user.is_verified) {
     return (
-      <View style={styles.container}>
-        <View style={styles.pendingCard}>
-          <Clock size={48} color="#fbbf24" />
-          <Text style={styles.pendingTitle}>Awaiting Approval</Text>
-          <Text style={styles.pendingText}>
-            Your account is pending faculty verification. You will be notified once approved.
-          </Text>
-          <ActivityIndicator size="large" color="#059669" style={{ marginTop: 20 }} />
-        </View>
+      <View style={styles.centerContainer}>
+        <ActivityIndicator size="large" color="#fbbf24" />
+        <Text style={styles.pendingText}>Verification Pending</Text>
       </View>
     );
   }
-
-  const room = systemStatuses[user.classroomId];
-  if (!room) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.errorText}>No assigned classroom yet.</Text>
-      </View>
-    );
-  }
-
-  const color = COLOR_MAP[room.led] || '#6b7280';
+  const myLogKey = Object.keys(roomAlerts).find(logKey => normalizeRoom(logKey) === normalizeRoom(user.room_num));
+  const myLog = myLogKey ? roomAlerts[myLogKey] : null;
+  const isAlert = myLog ? isRecentAlert(myLog.created_at) : false;
+  const dbDisplay = myLog ? myLog.db_level.toFixed(1) : '0.0';
 
   return (
-    <ScrollView contentContainerStyle={styles.teacherScrollContainer}>
-      <View style={[styles.statusMonitorCard, { borderColor: color }]}>
-        <Text style={[styles.roomTitle, { color }]}>Classroom {room.classroomId}</Text>
-        <Text style={styles.dataText}>Noise: {room.dbLevel.toFixed(1)} dB</Text>
-        <Text style={styles.dataText}>Status: {room.status}</Text>
-        <Text style={styles.dataText}>Breach: {formatDuration(room.breachDuration)}</Text>
+    <View style={styles.container}>
+      <View style={[styles.largeCard, isAlert ? styles.bgRedLight : styles.bgGreenLight]}>
+        {isAlert ? <Bell size={80} color="#ef4444"/> : <ShieldCheck size={80} color="#059669"/>}
+        <Text style={styles.largeStatus}>{isAlert ? "NOISE DETECTED" : "ROOM QUIET"}</Text>
+        <Text style={styles.hugeDb}>{dbDisplay} <Text style={{fontSize: 30}}>dB</Text></Text>
+        <Text style={styles.infoText}>Room: {user.room_num}</Text>
       </View>
-    </ScrollView>
+    </View>
   );
 };
 
-// --- Main Dashboard Component ---
+// ==========================================
+// 5. MAIN DASHBOARD CONTROLLER
+// ==========================================
 const DashboardScreen = ({ navigation }) => {
-  const { user, logout, allUsers, fetchAllUsers, systemStatuses, isLoading } = useNPMS();
+  const { user, logout, allUsers, fetchAllUsers, roomAlerts, isLoading } = useNPMS();
 
   React.useLayoutEffect(() => {
     navigation.setOptions({
       headerRight: () => (
-        <View style={{ flexDirection: 'row' }}>
-          <TouchableOpacity style={styles.headerLogoutButton} onPress={logout}>
-            <LogOut size={20} color="white" />
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity style={{marginRight: 10}} onPress={logout}><LogOut size={24} color="white" /></TouchableOpacity>
       ),
-      title: `${user?.role || 'User'} Dashboard`
+      title: `Hello, ${user?.name?.split(' ')[0] || 'User'}`
     });
   }, [navigation, user]);
 
-  // --- Approve / Reject Actions ---
   const approveUser = async (id) => {
-    try {
-      await supabase.from('profiles').update({ is_verified: true }).eq('id', id);
-      Alert.alert("Success", "User approved successfully.");
-      fetchAllUsers();
-    } catch (error) {
-      Alert.alert("Error", error.message);
-    }
+    const { data, error } = await supabase.from('profiles').update({ is_verified: true }).eq('id', id).select();
+    if (error || data.length === 0) Alert.alert("Error", "Permission Denied. Check Supabase RLS.");
+    else { Alert.alert("Success", "Teacher Approved"); fetchAllUsers(); }
   };
-
   const rejectUser = async (id) => {
-    try {
-      await supabase.from('profiles').delete().eq('id', id);
-      Alert.alert("User Rejected", "Account request has been deleted.");
-      fetchAllUsers();
-    } catch (error) {
-      Alert.alert("Error", error.message);
-    }
+    const { error } = await supabase.from('profiles').delete().eq('id', id);
+    if (!error) fetchAllUsers();
   };
 
-  if (!user) {
-    return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#059669" />
-      </View>
-    );
-  }
+  if (isLoading) return <ActivityIndicator size="large" color="#059669" style={{marginTop: 50}} />;
+  if (!user) return <Text>Error loading profile</Text>;
+
+  const isFaculty = (user.role || '').toLowerCase() === 'faculty';
 
   return (
     <View style={styles.container}>
-      {user.role === 'Faculty' ? (
-        <FacultyDashboard 
-          users={allUsers} 
-          onApprove={approveUser} 
-          onReject={rejectUser} 
-          systemStatuses={systemStatuses} 
-          loading={isLoading}
-        />
+      {isFaculty ? (
+        <FacultyDashboard users={allUsers} onApprove={approveUser} onReject={rejectUser} roomAlerts={roomAlerts} refreshData={fetchAllUsers} />
       ) : (
-        <TeacherDashboard user={user} systemStatuses={systemStatuses} />
+        <TeacherDashboard user={user} roomAlerts={roomAlerts} />
       )}
     </View>
   );
 };
 
+// ==========================================
+// STYLES
+// ==========================================
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f3f4f6' },
-  facultyScrollContainer: { padding: 16 },
-  roleTitle: { fontSize: 22, fontWeight: '700', color: '#1f2937', marginBottom: 10 },
-  listHeader: { fontSize: 18, fontWeight: '700', color: '#ef4444', marginTop: 10 },
-  listHeader_verified: { fontSize: 18, fontWeight: '600', color: '#374151', marginTop: 20 },
-  headerLogoutButton: { padding: 5 },
+  scrollContainer: { padding: 16, paddingBottom: 40 },
+  centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
+  
+  // Header Row for Print Button
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 15, marginTop: 10 },
+  sectionHeader: { fontSize: 20, fontWeight: 'bold', color: '#1f2937' },
+  subHeader: { fontSize: 14, color: '#6b7280' },
+  
+  printBtn: { backgroundColor: '#374151', flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, elevation: 2 },
+  printBtnText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
 
-  // Request Cards
-  requestCard: { backgroundColor: 'white', padding: 12, borderRadius: 8, marginBottom: 8, borderLeftWidth: 5, borderLeftColor: '#fbbf24', flexDirection: 'row', justifyContent: 'space-between' },
-  requestDetails: { flex: 1 },
-  requestName: { fontSize: 16, fontWeight: 'bold' },
-  requestInfo: { fontSize: 13, color: '#4b5563' },
-  requestActions: { flexDirection: 'row', alignItems: 'center' },
-  approveButton: { backgroundColor: '#059669', padding: 8, borderRadius: 6, flexDirection: 'row', alignItems: 'center', marginRight: 8 },
-  approveButtonText: { color: 'white', fontWeight: '600', marginLeft: 4 },
-  rejectButton: { backgroundColor: '#ef4444', padding: 8, borderRadius: 6 },
+  section: { marginBottom: 20 },
+  
+  // Card Styles
+  requestCard: { backgroundColor: 'white', padding: 15, borderRadius: 10, flexDirection: 'row', alignItems: 'center', marginBottom: 10, elevation: 2 },
+  actionRow: { flexDirection: 'row', gap: 10 },
+  btnApprove: { backgroundColor: '#059669', padding: 10, borderRadius: 8 },
+  btnReject: { backgroundColor: '#ef4444', padding: 10, borderRadius: 8 },
+  boldText: { fontWeight: 'bold', fontSize: 16, color: '#1f2937' },
+  subText: { color: '#6b7280', fontSize: 13 },
 
-  noRequestsContainer: { backgroundColor: 'white', padding: 20, borderRadius: 8, alignItems: 'center', marginBottom: 10 },
-  noRequestsText: { marginTop: 10, color: '#374151' },
+  roomCard: { backgroundColor: 'white', borderRadius: 12, marginBottom: 15, padding: 15, borderLeftWidth: 6, elevation: 3 },
+  borderRed: { borderLeftColor: '#ef4444' },
+  borderGreen: { borderLeftColor: '#059669' },
+  roomHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  roomTitle: { fontSize: 18, fontWeight: '800', color: '#374151' },
+  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
+  bgRed: { backgroundColor: '#fee2e2' },
+  bgGreen: { backgroundColor: '#d1fae5' },
+  badgeText: { fontSize: 12, fontWeight: 'bold', textTransform: 'uppercase' },
+  divider: { height: 1, backgroundColor: '#f3f4f6', marginVertical: 10 },
+  detailText: { fontSize: 14, color: '#4b5563' },
+  bold: { fontWeight: 'bold', color: '#111827' },
+  teacherBox: { marginTop: 8, padding: 10, backgroundColor: '#f9fafb', borderRadius: 8 },
+  unassignedBox: { backgroundColor: '#fef3c7' },
+  label: { fontSize: 12, color: '#6b7280' },
+  teacherName: { fontWeight: 'bold', color: '#374151', fontSize: 15 },
 
-  // Verified Users
-  verifiedCard: { backgroundColor: 'white', padding: 12, borderRadius: 8, marginBottom: 6 },
-  verifiedName: { fontWeight: 'bold', fontSize: 15 },
-  verifiedEmail: { color: '#4b5563', fontSize: 13 },
-  verifiedRole: { fontSize: 13, color: '#059669' },
+  // Teacher View
+  largeCard: { margin: 20, padding: 30, borderRadius: 20, alignItems: 'center', justifyContent: 'center', elevation: 5, flex: 1, maxHeight: 500, backgroundColor: 'white' },
+  bgRedLight: { backgroundColor: '#fef2f2', borderWidth: 3, borderColor: '#ef4444' },
+  bgGreenLight: { backgroundColor: '#f0fdf4', borderWidth: 3, borderColor: '#059669' },
+  largeStatus: { fontSize: 26, fontWeight: '900', marginTop: 20, marginBottom: 5, textTransform: 'uppercase' },
+  hugeDb: { fontSize: 60, fontWeight: '900', color: '#1f2937' },
+  infoText: { fontSize: 18, fontWeight: 'bold', color: '#374151', marginTop: 20 },
+  pendingText: { fontSize: 18, fontWeight: 'bold', color: '#fbbf24', marginTop: 20 },
 
-  // Room Status
-  roomCard: { backgroundColor: 'white', borderRadius: 8, borderLeftWidth: 5, marginBottom: 8, padding: 10 },
-  roomHeader: { flexDirection: 'row', justifyContent: 'space-between' },
-  roomTitle: { fontWeight: '700', fontSize: 16 },
-  roomStatus: { fontSize: 14, fontWeight: '700' },
-  dataText: { fontSize: 14, color: '#374151' },
-
-  // Pending / Teacher
-  pendingCard: { backgroundColor: 'white', padding: 30, borderRadius: 12, margin: 20, alignItems: 'center', borderWidth: 2, borderColor: '#fbbf24' },
-  pendingTitle: { fontSize: 22, fontWeight: 'bold', color: '#fbbf24' },
-  pendingText: { textAlign: 'center', color: '#4b5563', marginTop: 10 },
-  teacherScrollContainer: { padding: 20 },
-  statusMonitorCard: { backgroundColor: 'white', padding: 20, borderRadius: 12, borderWidth: 2, marginBottom: 20 },
-  errorText: { color: '#ef4444', textAlign: 'center', marginTop: 40, fontWeight: '700' },
+  // --- MODAL STYLES ---
+  centeredView: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  modalView: { width: '85%', backgroundColor: 'white', borderRadius: 20, padding: 25, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4, elevation: 5 },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', color: '#1f2937' },
+  modalStatus: { fontSize: 16, color: '#4b5563', marginBottom: 20 },
+  contactContainer: { width: '100%', alignItems: 'flex-start' },
+  contactLabel: { fontSize: 16, color: '#374151', marginBottom: 5 },
+  noTeacherText: { color: '#9ca3af', fontStyle: 'italic', marginTop: 10 },
+  modalBtnRow: { flexDirection: 'row', gap: 10, marginTop: 20, width: '100%' },
+  btnCall: { flex: 1, backgroundColor: '#059669', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
+  btnMessage: { flex: 1, backgroundColor: '#3b82f6', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
+  btnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
 });
 
 export default DashboardScreen;
