@@ -17,7 +17,7 @@ const HomeScreen = ({ navigation }) => {
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.signupButton} onPress={() => navigation.navigate('Signup')}>
-          <Text style={styles.signupButtonText}>Request Account</Text>
+          <Text style={styles.signupButtonText}>Register</Text>
         </TouchableOpacity>
       </View>
     </View>

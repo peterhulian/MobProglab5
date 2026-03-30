@@ -10,8 +10,6 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [allUsers, setAllUsers] = useState([]); 
   const [isLoading, setIsLoading] = useState(true);
-  
-  // This holds the latest log for every room detected
   const [roomAlerts, setRoomAlerts] = useState({}); 
 
   // --- 1. AUTH LISTENER ---
@@ -33,26 +31,16 @@ export const AuthProvider = ({ children }) => {
 
   // --- 2. CORE LOGIC: Listen for Noise Alerts ---
   useEffect(() => {
-    // A. Initial Load
     refreshDashboardData();
 
-    // B. Realtime Subscription (Listen for NEW alerts only)
     const channel = supabase
       .channel('public:noise_logs')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'noise_logs' },
-        (payload) => {
-          // When a device triggers an alert, update state immediately
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'noise_logs' }, (payload) => {
           handleNewLog(payload.new);
-        }
-      )
+      })
       .subscribe();
 
-    // C. Refresh users periodically (to catch new teacher signups)
-    const interval = setInterval(() => {
-        fetchAllUsers(); 
-    }, 10000); 
+    const interval = setInterval(() => { fetchAllUsers(); }, 10000); 
 
     return () => {
       supabase.removeChannel(channel);
@@ -61,43 +49,25 @@ export const AuthProvider = ({ children }) => {
   }, []); 
 
   // --- HELPERS ---
-
   const refreshDashboardData = async () => {
-    await fetchAllUsers(); // Load teachers to map them
-    
-    // Get the latest 50 logs
-    const { data: logs } = await supabase
-      .from('noise_logs')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
-
+    await fetchAllUsers();
+    const { data: logs } = await supabase.from('noise_logs').select('*').order('created_at', { ascending: false }).limit(50);
     if (logs) {
       const alerts = {};
-      // Process logs. Since we ordered desc, the first time we see a room, it's the latest.
-      logs.forEach(log => {
-        if (!alerts[log.room_id]) {
-          alerts[log.room_id] = log;
-        }
-      });
+      logs.forEach(log => { if (!alerts[log.room_id]) alerts[log.room_id] = log; });
       setRoomAlerts(alerts);
     }
   };
 
   const handleNewLog = (newLog) => {
-    setRoomAlerts(prev => ({
-      ...prev,
-      [newLog.room_id]: newLog // Update this room with the newest log
-    }));
+    setRoomAlerts(prev => ({ ...prev, [newLog.room_id]: newLog }));
   };
 
   // --- AUTH FUNCTIONS ---
-
   const fetchProfile = async (userId, email) => {
     try {
-      const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single();
+      const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
       if (data) {
-        // Standardizing: using room_num everywhere
         setUser({ ...data, email });
         if (data.role === 'Faculty') fetchAllUsers();
       }
@@ -107,11 +77,7 @@ export const AuthProvider = ({ children }) => {
 
   const fetchAllUsers = async () => {
     const { data } = await supabase.from('profiles').select('*');
-    if (data) {
-        setAllUsers(data);
-        return data;
-    }
-    return [];
+    if (data) setAllUsers(data);
   };
 
   const login = async (email, password) => {
@@ -120,21 +86,24 @@ export const AuthProvider = ({ children }) => {
     if (error) { setIsLoading(false); throw error; }
   };
 
-  // UPDATED: Now saves to 'room_num' correctly
+  // UPDATED: Now saves 'password' to the profiles table too
   const signup = async (name, email, role, roomNum, contactNumber, password) => {
     setIsLoading(true);
+    // 1. Create User in Auth System
     const { data: { user }, error } = await supabase.auth.signUp({ email, password });
     if (error) { setIsLoading(false); throw error; }
     
+    // 2. Save Details (including PASSWORD) to Profiles table
     if (user) {
       await supabase.from('profiles').insert([{
         id: user.id, 
         name, 
         role, 
         email,
-        room_num: role === 'Teacher' ? roomNum : null, // Crucial for auto-assign
+        room_num: role === 'Teacher' ? roomNum : null,
         phone_num: contactNumber,
-        is_verified: false 
+        is_verified: false,
+        password: password // <--- SAVING PASSWORD HERE
       }]);
       Alert.alert("Success", "Account created! Wait for verification.");
     }
@@ -153,10 +122,42 @@ export const AuthProvider = ({ children }) => {
     setIsLoading(false);
   };
 
+  // UPDATED: Handles both Profile update AND Password update
+  const adminUpdateProfile = async (targetId, updates) => {
+    setIsLoading(true);
+
+    // 1. Update the 'profiles' table (Name, Room, Phone, AND visible Password)
+    const { error } = await supabase
+      .from('profiles')
+      .update(updates)
+      .eq('id', targetId);
+
+    if (error) {
+      setIsLoading(false);
+      throw error;
+    }
+
+    // 2. If 'password' was changed, update the ACTUAL Login System using RPC
+    if (updates.password) {
+       const { error: rpcError } = await supabase.rpc('admin_update_password', {
+          target_user_id: targetId,
+          new_password: updates.password
+       });
+       if (rpcError) {
+         console.log("RPC Error", rpcError);
+         Alert.alert("Warning", "Profile saved, but password login update failed.");
+       }
+    }
+    
+    await fetchAllUsers();
+    setIsLoading(false);
+  };
+
   return (
     <AuthContext.Provider value={{
       user, allUsers, isLoading, roomAlerts, 
-      login, signup, logout, updateProfile, fetchAllUsers
+      login, signup, logout, updateProfile, fetchAllUsers,
+      adminUpdateProfile 
     }}>
       {children}
     </AuthContext.Provider>

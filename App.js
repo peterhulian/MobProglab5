@@ -8,13 +8,14 @@ import HomeScreen from './screens/HomeScreen';
 import LoginScreen from './screens/LoginScreen';
 import SignupScreen from './screens/SignupScreen';
 import DashboardScreen from './screens/DashboardScreen';
+// Ensure you have created this file from the previous instructions
+import ManageTeacherScreen from './screens/ManageTeacherScreen';
 
 const Stack = createNativeStackNavigator();
 
 const AppNavigator = () => {
     const { user, isLoading } = useNPMS();
 
-    // IMPROVEMENT: Show a spinner instead of a blank screen while checking session
     if (isLoading) {
         return (
             <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'white' }}>
@@ -31,17 +32,25 @@ const AppNavigator = () => {
         }}>
             {user ? (
                 // --- AUTHENTICATED STACK ---
-                <Stack.Screen 
-                    name="Dashboard" 
-                    component={DashboardScreen} 
-                    options={{ title: 'NPMS Dashboard' }}
-                />
+                <Stack.Group>
+                    <Stack.Screen 
+                        name="Dashboard" 
+                        component={DashboardScreen} 
+                        options={{ title: 'NPMS Dashboard' }}
+                    />
+                    {/* NEW: Edit Screen */}
+                    <Stack.Screen 
+                        name="ManageTeacher" 
+                        component={ManageTeacherScreen} 
+                        options={{ title: 'Edit Teacher' }}
+                    />
+                </Stack.Group>
             ) : (
                 // --- PUBLIC STACK ---
                 <Stack.Group>
                     <Stack.Screen name="Home" component={HomeScreen} options={{ headerShown: false }} />
                     <Stack.Screen name="Login" component={LoginScreen} options={{ title: 'Login' }}/>
-                    <Stack.Screen name="Signup" component={SignupScreen} options={{ title: 'Request Access' }}/>
+                    <Stack.Screen name="Signup" component={SignupScreen} options={{ title: 'Registration' }}/>
                 </Stack.Group>
             )}
         </Stack.Navigator>

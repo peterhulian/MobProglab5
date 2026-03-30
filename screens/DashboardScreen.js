@@ -4,15 +4,16 @@ import {
   ActivityIndicator, RefreshControl, Alert, Modal, Linking
 } from 'react-native';
 import { useNPMS } from '../context/AuthContext';
+import RoomCard from '../components/RoomCard';
 import { supabase } from '../lib/supabase';
-import { generateAndPrintReport } from '../lib/ReportGenerator'; // Import the generator
+import { generateAndPrintReport } from '../lib/ReportGenerator';
 import {
-  LogOut, Check, X, Bell, ShieldCheck, Phone, MessageSquare, XCircle, Printer
+  LogOut, Check, X, Bell, ShieldCheck, Phone, 
+  MessageSquare, XCircle, Printer, Edit
 } from 'lucide-react-native';
 
 // --- 1. HELPER FUNCTIONS ---
 
-// Normalizer: "Room 2" -> "2"
 const normalizeRoom = (roomString) => {
     if (!roomString) return 'unknown_room';
     return roomString.toString().toLowerCase()
@@ -30,29 +31,24 @@ const isRecentAlert = (createdAt) => {
 // ==========================================
 // 2. FACULTY VIEW (With Report & Actions)
 // ==========================================
-const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData }) => {
+const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData, navigation }) => {
   const pendingUsers = users.filter(u => !u.is_verified);
   
-  // STATE FOR POPUP & PRINTING
   const [selectedRoom, setSelectedRoom] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
 
-  // --- OPEN ACTION MENU ---
   const handleRoomClick = (room) => {
       setSelectedRoom(room);
       setModalVisible(true);
   };
 
-  // --- ACTION: PRINT REPORT ---
   const handlePrint = async () => {
     setIsPrinting(true);
-    // We pass 'users' so the report knows the Teacher Names
     await generateAndPrintReport(users);
     setIsPrinting(false);
   };
 
-  // --- ACTION: CALL TEACHER ---
   const performCall = () => {
       if (!selectedRoom?.teacher?.phone_num) {
           Alert.alert("No Number", "This teacher hasn't provided a phone number.");
@@ -61,7 +57,6 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData 
       Linking.openURL(`tel:${selectedRoom.teacher.phone_num}`);
   };
 
-  // --- ACTION: SEND SMS NOTICE ---
   const performMessage = () => {
       if (!selectedRoom?.teacher?.phone_num) {
           Alert.alert("No Number", "This teacher hasn't provided a phone number.");
@@ -71,10 +66,8 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData 
       Linking.openURL(`sms:${selectedRoom.teacher.phone_num}?body=${message}`);
   };
 
-  // --- DATA PROCESSING ---
   const monitoredRooms = useMemo(() => {
     const list = [];
-    // 1. Add rooms that have logs
     Object.values(roomAlerts).forEach(log => {
         const iotRoomClean = normalizeRoom(log.room_id);
         const teacher = users.find(u => 
@@ -89,7 +82,6 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData 
         });
     });
 
-    // 2. Add rooms that have teachers but no logs yet
     users.forEach(u => {
         if(u.role === 'Teacher' && u.room_num) {
             const teacherRoomClean = normalizeRoom(u.room_num);
@@ -127,7 +119,7 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData 
             </View>
         )}
 
-        {/* Room Monitoring Header with Print Button */}
+        {/* Room Monitoring Header */}
         <View style={styles.headerRow}>
             <View>
                 <Text style={styles.sectionHeader}>Room Monitoring</Text>
@@ -155,31 +147,13 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData 
             const dbLevel = room.logData ? room.logData.db_level.toFixed(1) : '0.0';
 
             return (
-            <TouchableOpacity 
-                key={index} 
+              <RoomCard 
+                key={index}
+                room={room}
+                isAlert={isAlert}
+                dbLevel={dbLevel}
                 onPress={() => handleRoomClick(room)}
-                activeOpacity={0.7}
-                style={[styles.roomCard, isAlert ? styles.borderRed : styles.borderGreen]}
-            >
-                <View style={styles.roomHeader}>
-                <Text style={styles.roomTitle}>{room.roomId}</Text>
-                <View style={[styles.badge, isAlert ? styles.bgRed : styles.bgGreen]}>
-                    <Text style={styles.badgeText}>{room.status}</Text>
-                </View>
-                </View>
-                <View style={styles.divider} />
-                <View style={styles.roomDetails}>
-                    {room.logData ? (
-                        <Text style={styles.detailText}>Noise Level: <Text style={styles.bold}>{dbLevel} dB</Text></Text>
-                    ) : (
-                        <Text style={[styles.detailText, {fontStyle:'italic', color: '#9ca3af'}]}>No recent noise.</Text>
-                    )}
-                    <View style={[styles.teacherBox, !room.teacher && styles.unassignedBox]}>
-                        <Text style={styles.label}>Assigned Teacher:</Text>
-                        <Text style={styles.teacherName}>{room.teacher ? room.teacher.name : 'Unassigned'}</Text>
-                    </View>
-                </View>
-            </TouchableOpacity>
+              />
             );
         })}
         </ScrollView>
@@ -219,7 +193,17 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData 
 
                                 <TouchableOpacity style={styles.btnMessage} onPress={performMessage}>
                                     <MessageSquare size={20} color="white" style={{marginRight: 8}}/>
-                                    <Text style={styles.btnText}>Notice</Text>
+                                    <Text style={styles.btnText}>Msg</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity 
+                                    style={styles.btnEdit} 
+                                    onPress={() => {
+                                        setModalVisible(false);
+                                        navigation.navigate('ManageTeacher', { teacher: selectedRoom.teacher });
+                                    }}
+                                >
+                                    <Edit size={20} color="white" />
                                 </TouchableOpacity>
                             </View>
                         </View>
@@ -295,7 +279,14 @@ const DashboardScreen = ({ navigation }) => {
   return (
     <View style={styles.container}>
       {isFaculty ? (
-        <FacultyDashboard users={allUsers} onApprove={approveUser} onReject={rejectUser} roomAlerts={roomAlerts} refreshData={fetchAllUsers} />
+        <FacultyDashboard 
+            users={allUsers} 
+            onApprove={approveUser} 
+            onReject={rejectUser} 
+            roomAlerts={roomAlerts} 
+            refreshData={fetchAllUsers}
+            navigation={navigation} // PASSED HERE
+        />
       ) : (
         <TeacherDashboard user={user} roomAlerts={roomAlerts} />
       )}
@@ -311,7 +302,6 @@ const styles = StyleSheet.create({
   scrollContainer: { padding: 16, paddingBottom: 40 },
   centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   
-  // Header Row for Print Button
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 15, marginTop: 10 },
   sectionHeader: { fontSize: 20, fontWeight: 'bold', color: '#1f2937' },
   subHeader: { fontSize: 14, color: '#6b7280' },
@@ -321,7 +311,6 @@ const styles = StyleSheet.create({
 
   section: { marginBottom: 20 },
   
-  // Card Styles
   requestCard: { backgroundColor: 'white', padding: 15, borderRadius: 10, flexDirection: 'row', alignItems: 'center', marginBottom: 10, elevation: 2 },
   actionRow: { flexDirection: 'row', gap: 10 },
   btnApprove: { backgroundColor: '#059669', padding: 10, borderRadius: 8 },
@@ -346,7 +335,6 @@ const styles = StyleSheet.create({
   label: { fontSize: 12, color: '#6b7280' },
   teacherName: { fontWeight: 'bold', color: '#374151', fontSize: 15 },
 
-  // Teacher View
   largeCard: { margin: 20, padding: 30, borderRadius: 20, alignItems: 'center', justifyContent: 'center', elevation: 5, flex: 1, maxHeight: 500, backgroundColor: 'white' },
   bgRedLight: { backgroundColor: '#fef2f2', borderWidth: 3, borderColor: '#ef4444' },
   bgGreenLight: { backgroundColor: '#f0fdf4', borderWidth: 3, borderColor: '#059669' },
@@ -355,7 +343,6 @@ const styles = StyleSheet.create({
   infoText: { fontSize: 18, fontWeight: 'bold', color: '#374151', marginTop: 20 },
   pendingText: { fontSize: 18, fontWeight: 'bold', color: '#fbbf24', marginTop: 20 },
 
-  // --- MODAL STYLES ---
   centeredView: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   modalView: { width: '85%', backgroundColor: 'white', borderRadius: 20, padding: 25, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4, elevation: 5 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
@@ -364,9 +351,11 @@ const styles = StyleSheet.create({
   contactContainer: { width: '100%', alignItems: 'flex-start' },
   contactLabel: { fontSize: 16, color: '#374151', marginBottom: 5 },
   noTeacherText: { color: '#9ca3af', fontStyle: 'italic', marginTop: 10 },
-  modalBtnRow: { flexDirection: 'row', gap: 10, marginTop: 20, width: '100%' },
-  btnCall: { flex: 1, backgroundColor: '#059669', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
-  btnMessage: { flex: 1, backgroundColor: '#3b82f6', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
+  
+  modalBtnRow: { flexDirection: 'row', gap: 8, marginTop: 20, width: '100%' },
+  btnCall: { flex: 2, backgroundColor: '#059669', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
+  btnMessage: { flex: 2, backgroundColor: '#3b82f6', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
+  btnEdit: { flex: 1, backgroundColor: '#f59e0b', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
   btnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
 });
 

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
+import { View, Text, TextInput, StyleSheet, Alert, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
 import { useNPMS } from '../context/AuthContext';
 import { Mail, Lock } from 'lucide-react-native';
+import CustomButton from '../components/CustomButton';
 
 const LoginScreen = ({ navigation }) => {
   const [email, setEmail] = useState('');
@@ -15,6 +16,8 @@ const LoginScreen = ({ navigation }) => {
     try {
       await login(email, password);
     } catch (error) {
+       // This prints the exact error to your VS Code terminal so we can fix it!
+       console.error("FULL SUPABASE ERROR: ", error); 
        Alert.alert('Login Failed', error.message);
     } finally {
        setLocalLoading(false);
@@ -30,17 +33,32 @@ const LoginScreen = ({ navigation }) => {
         <View style={styles.inputContainer}>
             <View style={styles.inputWrapper}>
                 <Mail size={20} color="#6b7280" style={styles.icon} />
-                <TextInput style={styles.input} placeholder="Email" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address"/>
+                <TextInput 
+                  style={styles.input} 
+                  placeholder="Email" 
+                  value={email} 
+                  onChangeText={setEmail} 
+                  autoCapitalize="none" 
+                  keyboardType="email-address"
+                />
             </View>
             <View style={styles.inputWrapper}>
                 <Lock size={20} color="#6b7280" style={styles.icon} />
-                <TextInput style={styles.input} placeholder="Password" value={password} onChangeText={setPassword} secureTextEntry />
+                <TextInput 
+                  style={styles.input} 
+                  placeholder="Password" 
+                  value={password} 
+                  onChangeText={setPassword} 
+                  secureTextEntry 
+                />
             </View>
         </View>
 
-        <TouchableOpacity style={styles.button} onPress={handleLogin} disabled={localLoading}>
-          {localLoading ? <ActivityIndicator color="white" /> : <Text style={styles.btnText}>Log In</Text>}
-        </TouchableOpacity>
+        <CustomButton 
+          title="Log In" 
+          onPress={handleLogin} 
+          loading={localLoading} 
+        />
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -53,9 +71,7 @@ const styles = StyleSheet.create({
   inputContainer: { width: '100%', maxWidth: 350, gap: 15, marginBottom: 30 },
   inputWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 8, paddingHorizontal: 15, height: 50 },
   icon: { marginRight: 10 },
-  input: { flex: 1, fontSize: 16 },
-  button: { width: '100%', maxWidth: 350, backgroundColor: '#059669', padding: 15, borderRadius: 8, alignItems: 'center' },
-  btnText: { color: 'white', fontSize: 16, fontWeight: 'bold' }
+  input: { flex: 1, fontSize: 16 }
 });
 
 export default LoginScreen;
