@@ -1,6 +1,9 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
-import { supabase } from '../lib/supabase';
 import { Alert } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Your computer's current local IP address
+const API_BASE_URL = 'http://192.168.1.14:8000/api';
 
 const AuthContext = createContext({});
 
@@ -12,150 +15,193 @@ export const AuthProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [roomAlerts, setRoomAlerts] = useState({}); 
 
-  // --- 1. AUTH LISTENER ---
+  // --- 1. AUTH INITIALIZATION ---
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) fetchProfile(session.user.id, session.user.email);
-      else setIsLoading(false);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) fetchProfile(session.user.id, session.user.email);
-      else {
-        setUser(null);
-        setIsLoading(false);
-      }
-    });
-    return () => subscription.unsubscribe();
+    checkLoggedInUser();
   }, []);
 
-  // --- 2. CORE LOGIC: Listen for Noise Alerts ---
+  const checkLoggedInUser = async () => {
+    try {
+      const storedUser = await AsyncStorage.getItem('user');
+      if (storedUser) {
+        setUser(JSON.parse(storedUser));
+      }
+    } catch (e) {
+      console.log("Error reading local storage", e);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // --- 2. CORE LOGIC: Polling for Noise Alerts ---
   useEffect(() => {
+    if (!user) return; 
+
     refreshDashboardData();
 
-    const channel = supabase
-      .channel('public:noise_logs')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'noise_logs' }, (payload) => {
-          handleNewLog(payload.new);
-      })
-      .subscribe();
+    const interval = setInterval(() => { 
+      refreshDashboardData(); 
+    }, 5000); 
 
-    const interval = setInterval(() => { fetchAllUsers(); }, 10000); 
-
-    return () => {
-      supabase.removeChannel(channel);
-      clearInterval(interval);
-    };
-  }, []); 
+    return () => clearInterval(interval);
+  }, [user]); 
 
   // --- HELPERS ---
   const refreshDashboardData = async () => {
     await fetchAllUsers();
-    const { data: logs } = await supabase.from('noise_logs').select('*').order('created_at', { ascending: false }).limit(50);
-    if (logs) {
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/logs/`);
+      if (!response.ok) throw new Error("Failed to fetch logs");
+      
+      const logs = await response.json();
+      
       const alerts = {};
-      logs.forEach(log => { if (!alerts[log.room_id]) alerts[log.room_id] = log; });
+      logs.forEach(log => { 
+        if (!alerts[log.room_id]) alerts[log.room_id] = log; 
+      });
       setRoomAlerts(alerts);
+    } catch (error) {
+      console.log("Polling error:", error);
     }
   };
 
-  const handleNewLog = (newLog) => {
-    setRoomAlerts(prev => ({ ...prev, [newLog.room_id]: newLog }));
+  const fetchAllUsers = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/`);
+      if (response.ok) {
+        const data = await response.json();
+        setAllUsers(data);
+      }
+    } catch (error) {
+      console.log("Error fetching users:", error);
+    }
   };
 
   // --- AUTH FUNCTIONS ---
-  const fetchProfile = async (userId, email) => {
-    try {
-      const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
-      if (data) {
-        setUser({ ...data, email });
-        if (data.role === 'Faculty') fetchAllUsers();
-      }
-    } catch (e) { console.log(e); } 
-    finally { setIsLoading(false); }
-  };
-
-  const fetchAllUsers = async () => {
-    const { data } = await supabase.from('profiles').select('*');
-    if (data) setAllUsers(data);
-  };
-
   const login = async (email, password) => {
     setIsLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) { setIsLoading(false); throw error; }
+    try {
+      const response = await fetch(`${API_BASE_URL}/login/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+
+      const textResponse = await response.text(); 
+      let data;
+      try {
+          data = JSON.parse(textResponse); 
+      } catch (err) {
+          console.log("DJANGO CRASHED. RAW HTML RESPONSE:", textResponse.substring(0, 300));
+          throw new Error("Server error. Check your Django terminal for a traceback.");
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || "Login failed");
+      }
+
+      await AsyncStorage.setItem('user', JSON.stringify(data.user));
+      setUser(data.user);
+
+    } catch (error) {
+      console.log("Login Error:", error);
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // UPDATED: Now saves 'password' to the profiles table too
   const signup = async (name, email, role, roomNum, contactNumber, password) => {
     setIsLoading(true);
-    // 1. Create User in Auth System
-    const { data: { user }, error } = await supabase.auth.signUp({ email, password });
-    if (error) { setIsLoading(false); throw error; }
-    
-    // 2. Save Details (including PASSWORD) to Profiles table
-    if (user) {
-      await supabase.from('profiles').insert([{
-        id: user.id, 
-        name, 
-        role, 
-        email,
-        room_num: role === 'Teacher' ? roomNum : null,
-        phone_num: contactNumber,
-        is_verified: false,
-        password: password // <--- SAVING PASSWORD HERE
-      }]);
+    try {
+      const response = await fetch(`${API_BASE_URL}/register/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: name,
+          email: email,
+          password: password,
+          role: role,
+          room_num: role === 'Teacher' ? roomNum : null,
+          phone_num: contactNumber
+        })
+      });
+
+      const textResponse = await response.text(); 
+      let data;
+      try {
+          data = JSON.parse(textResponse);
+      } catch (err) {
+          console.log("DJANGO CRASHED. RAW HTML RESPONSE:", textResponse.substring(0, 300));
+          throw new Error("Server error. Check your Django terminal for a traceback.");
+      }
+
+      if (!response.ok) {
+        const errorMessage = typeof data === 'object' ? JSON.stringify(data) : "Registration failed";
+        throw new Error(errorMessage);
+      }
+
       Alert.alert("Success", "Account created! Wait for verification.");
+    } catch (error) {
+      console.log("Signup Error:", error);
+      throw error;
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const logout = async () => {
-    await supabase.auth.signOut();
+    await AsyncStorage.removeItem('user');
+    setUser(null);
   };
   
   const updateProfile = async (name, email, contactNumber) => {
     if (!user) return;
     setIsLoading(true);
-    await supabase.from('profiles').update({ name, phone_num: contactNumber, email }).eq('id', user.id);
-    if (user.email !== email) await supabase.auth.updateUser({ email });
-    await fetchProfile(user.id, email);
-    setIsLoading(false);
+    try {
+      const response = await fetch(`${API_BASE_URL}/profiles/${user.id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, phone_num: contactNumber })
+      });
+
+      if (!response.ok) throw new Error("Update failed");
+
+      const updatedUser = await response.json();
+      await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
+      setUser(updatedUser);
+
+    } catch (error) {
+      Alert.alert("Error", error.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // UPDATED: Handles both Profile update AND Password update
   const adminUpdateProfile = async (targetId, updates) => {
     setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/profiles/${targetId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
 
-    // 1. Update the 'profiles' table (Name, Room, Phone, AND visible Password)
-    const { error } = await supabase
-      .from('profiles')
-      .update(updates)
-      .eq('id', targetId);
+      if (!response.ok) throw new Error("Admin update failed");
 
-    if (error) {
-      setIsLoading(false);
+      await fetchAllUsers();
+    } catch (error) {
+      console.log("Admin Error:", error);
       throw error;
+    } finally {
+      setIsLoading(false);
     }
-
-    // 2. If 'password' was changed, update the ACTUAL Login System using RPC
-    if (updates.password) {
-       const { error: rpcError } = await supabase.rpc('admin_update_password', {
-          target_user_id: targetId,
-          new_password: updates.password
-       });
-       if (rpcError) {
-         console.log("RPC Error", rpcError);
-         Alert.alert("Warning", "Profile saved, but password login update failed.");
-       }
-    }
-    
-    await fetchAllUsers();
-    setIsLoading(false);
   };
 
   return (
     <AuthContext.Provider value={{
-      user, allUsers, isLoading, roomAlerts, 
+      user, allUsers, setAllUsers, isLoading, roomAlerts, 
       login, signup, logout, updateProfile, fetchAllUsers,
       adminUpdateProfile 
     }}>

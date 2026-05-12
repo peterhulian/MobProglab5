@@ -5,14 +5,13 @@ import {
 } from 'react-native';
 import { useNPMS } from '../context/AuthContext';
 import RoomCard from '../components/RoomCard';
-import { supabase } from '../lib/supabase';
 import { generateAndPrintReport } from '../lib/ReportGenerator';
 import {
   LogOut, Check, X, Bell, ShieldCheck, Phone, 
   MessageSquare, XCircle, Printer, Edit
 } from 'lucide-react-native';
 
-// --- 1. HELPER FUNCTIONS ---
+const API_BASE_URL = 'http://192.168.1.14:8000/api';
 
 const normalizeRoom = (roomString) => {
     if (!roomString) return 'unknown_room';
@@ -31,7 +30,7 @@ const isRecentAlert = (createdAt) => {
 // ==========================================
 // 2. FACULTY VIEW (With Report & Actions)
 // ==========================================
-const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData, navigation }) => {
+const FacultyDashboard = ({ users, onApprove, onReject, onDelete, roomAlerts, refreshData, navigation }) => {
   const pendingUsers = users.filter(u => !u.is_verified);
   
   const [selectedRoom, setSelectedRoom] = useState(null);
@@ -206,6 +205,18 @@ const FacultyDashboard = ({ users, onApprove, onReject, roomAlerts, refreshData,
                                     <Edit size={20} color="white" />
                                 </TouchableOpacity>
                             </View>
+
+                            {/* NEW DELETE BUTTON */}
+                            <TouchableOpacity 
+                                style={styles.btnDelete} 
+                                onPress={() => {
+                                    setModalVisible(false);
+                                    onDelete(selectedRoom.teacher.id);
+                                }}
+                            >
+                                <Text style={styles.btnText}>🗑 Delete Teacher Account</Text>
+                            </TouchableOpacity>
+
                         </View>
                     ) : (
                         <Text style={styles.noTeacherText}>No teacher assigned to this room.</Text>
@@ -250,7 +261,8 @@ const TeacherDashboard = ({ user, roomAlerts }) => {
 // 5. MAIN DASHBOARD CONTROLLER
 // ==========================================
 const DashboardScreen = ({ navigation }) => {
-  const { user, logout, allUsers, fetchAllUsers, roomAlerts, isLoading } = useNPMS();
+  // Pulled setAllUsers from context
+  const { user, logout, allUsers, setAllUsers, fetchAllUsers, roomAlerts, isLoading } = useNPMS();
 
   React.useLayoutEffect(() => {
     navigation.setOptions({
@@ -262,13 +274,61 @@ const DashboardScreen = ({ navigation }) => {
   }, [navigation, user]);
 
   const approveUser = async (id) => {
-    const { data, error } = await supabase.from('profiles').update({ is_verified: true }).eq('id', id).select();
-    if (error || data.length === 0) Alert.alert("Error", "Permission Denied. Check Supabase RLS.");
-    else { Alert.alert("Success", "Teacher Approved"); fetchAllUsers(); }
+    // INSTANT UI UPDATE: Verify them in UI instantly
+    setAllUsers(prev => prev.map(u => u.id === id ? { ...u, is_verified: true } : u));
+    try {
+      const response = await fetch(`${API_BASE_URL}/profiles/${id}/approve/`, { 
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (!response.ok) throw new Error("Permission Denied.");
+    } catch (error) {
+      Alert.alert("Error", error.message);
+      fetchAllUsers(); // rollback if failed
+    }
   };
+
   const rejectUser = async (id) => {
-    const { error } = await supabase.from('profiles').delete().eq('id', id);
-    if (!error) fetchAllUsers();
+    // INSTANT UI UPDATE: Remove from UI instantly
+    setAllUsers(prev => prev.filter(u => u.id !== id));
+    try {
+      const response = await fetch(`${API_BASE_URL}/profiles/${id}/`, { 
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (!response.ok) fetchAllUsers(); // rollback if failed
+    } catch (error) {
+      console.log("Error rejecting user", error);
+      fetchAllUsers(); 
+    }
+  };
+
+  const deleteUser = (id) => {
+    Alert.alert(
+      "Delete Teacher",
+      "Are you sure you want to permanently delete this teacher's account?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Delete", 
+          style: "destructive",
+          onPress: async () => {
+            // INSTANT UI UPDATE: Remove from UI instantly
+            setAllUsers(prev => prev.filter(u => u.id !== id));
+            try {
+              const response = await fetch(`${API_BASE_URL}/profiles/${id}/`, { 
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' }
+              });
+              if (!response.ok) throw new Error("Delete failed");
+            } catch (error) {
+              Alert.alert("Error", "Failed to delete user.");
+              fetchAllUsers(); // rollback
+            }
+          }
+        }
+      ]
+    );
   };
 
   if (isLoading) return <ActivityIndicator size="large" color="#059669" style={{marginTop: 50}} />;
@@ -283,9 +343,10 @@ const DashboardScreen = ({ navigation }) => {
             users={allUsers} 
             onApprove={approveUser} 
             onReject={rejectUser} 
+            onDelete={deleteUser} 
             roomAlerts={roomAlerts} 
             refreshData={fetchAllUsers}
-            navigation={navigation} // PASSED HERE
+            navigation={navigation} 
         />
       ) : (
         <TeacherDashboard user={user} roomAlerts={roomAlerts} />
@@ -356,6 +417,7 @@ const styles = StyleSheet.create({
   btnCall: { flex: 2, backgroundColor: '#059669', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
   btnMessage: { flex: 2, backgroundColor: '#3b82f6', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
   btnEdit: { flex: 1, backgroundColor: '#f59e0b', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10 },
+  btnDelete: { width: '100%', backgroundColor: '#dc2626', alignItems: 'center', justifyContent: 'center', padding: 12, borderRadius: 10, marginTop: 15 },
   btnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
 });
 

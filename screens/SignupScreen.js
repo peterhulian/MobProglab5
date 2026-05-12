@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView } from 'react-native';
 import { useNPMS } from '../context/AuthContext';
-import { supabase } from '../lib/supabase';
 import { User, Mail, Lock, Home, Phone, Briefcase, ChevronDown, ChevronUp } from 'lucide-react-native';
+
+// --- REPLACE THIS with your computer's local IP address ---
+const API_BASE_URL = 'http://192.168.1.14:8000/api';
+
 
 const SignupScreen = ({ navigation }) => {
   const [name, setName] = useState('');
@@ -13,47 +16,45 @@ const SignupScreen = ({ navigation }) => {
   const [contactNumber, setContactNumber] = useState('');
   const [localLoading, setLocalLoading] = useState(false);
   
-  // Dynamic Rooms State
+  // Dynamic Rooms State (Kept in background in case you need it later)
   const [availableRooms, setAvailableRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(true);
 
   // Dropdown States
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
-  const [roomDropdownOpen, setRoomDropdownOpen] = useState(false);
   
   const { signup } = useNPMS();
 
-  // --- UPDATED: Fetch ONLY AVAILABLE Rooms ---
+  // --- UPDATED: Fetch from Django API (Fails Silently) ---
   useEffect(() => {
     const fetchRooms = async () => {
       try {
         setLoadingRooms(true);
-        // Call the NEW SQL function that filters out taken rooms
-        const { data, error } = await supabase.rpc('get_available_rooms');
+        const response = await fetch(`${API_BASE_URL}/available-rooms/`); 
         
-        if (error) throw error;
-
-        if (data) {
-          const rooms = data.map(item => item.room_id);
-          setAvailableRooms(rooms);
-        }
+        // If the API fails or is empty, we just exit and let the user type manually
+        if (!response.ok) return; 
+        
+        const data = await response.json();
+        const rooms = data.map(item => item.room_id); 
+        setAvailableRooms(rooms);
       } catch (err) {
-        console.log("Error fetching rooms:", err);
-        setAvailableRooms([]); 
+        // Log it to console for you, but don't show the user
+        console.log("IoT/API Room fetch skipped:", err); 
       } finally {
         setLoadingRooms(false);
       }
     };
 
-    // Only fetch if role is Teacher
     if (role === 'Teacher') {
         fetchRooms();
     }
-  }, [role]); // Re-run if role changes back to Teacher
+  }, [role]);
 
   const handleSignup = async () => {
-    if (!name || !email || !password || (role === 'Teacher' && !roomNum)) {
-      Alert.alert('Incomplete Form', 'Please fill out all required fields.');
+    // Bypassed validation: Removed the (role === 'Teacher' && !roomNum) requirement
+    if (!name || !email || !password) {
+      Alert.alert('Incomplete Form', 'Name, Email, and Password are required.');
       return;
     }
     
@@ -71,17 +72,6 @@ const SignupScreen = ({ navigation }) => {
   
   const toggleRoleDropdown = () => {
     setRoleDropdownOpen(!roleDropdownOpen);
-    setRoomDropdownOpen(false); 
-  };
-
-  const toggleRoomDropdown = () => {
-    setRoomDropdownOpen(!roomDropdownOpen);
-    setRoleDropdownOpen(false); 
-  };
-
-  const selectRoom = (r) => {
-      setRoomNum(r);
-      setRoomDropdownOpen(false);
   };
 
   return (
@@ -132,46 +122,26 @@ const SignupScreen = ({ navigation }) => {
 
         {role === 'Teacher' && (
           <>
-            {/* --- AVAILABLE ROOMS DROPDOWN --- */}
-            <View style={styles.dropdownContainer}>
-                <TouchableOpacity style={styles.inputGroup} onPress={toggleRoomDropdown}>
-                    <Home size={20} color="#6b7280" style={styles.icon} />
-                    <Text style={[styles.inputText, !roomNum && { color: '#9ca3af' }]}>
-                        {roomNum || "Select Available Room"}
-                    </Text>
-                    {loadingRooms ? <ActivityIndicator size="small" color="#059669"/> : (
-                        roomDropdownOpen ? <ChevronUp size={20} color="#6b7280"/> : <ChevronDown size={20} color="#6b7280"/>
-                    )}
-                </TouchableOpacity>
-
-                {roomDropdownOpen && (
-                    <View style={styles.dropdownList}>
-                        <ScrollView style={{ maxHeight: 150 }} nestedScrollEnabled={true}>
-                            {availableRooms.length === 0 ? (
-                                <View style={styles.dropdownItem}>
-                                    <Text style={[styles.itemText, { fontStyle: 'italic', color: '#ef4444' }]}>
-                                        No rooms available
-                                    </Text>
-                                </View>
-                            ) : (
-                                availableRooms.map((r, index) => (
-                                    <TouchableOpacity 
-                                        key={index} 
-                                        style={styles.dropdownItem} 
-                                        onPress={() => selectRoom(r)}
-                                    >
-                                        <Text style={styles.itemText}>{r}</Text>
-                                    </TouchableOpacity>
-                                ))
-                            )}
-                        </ScrollView>
-                    </View>
-                )}
+            {/* --- MANUAL ROOM INPUT --- */}
+            <View style={styles.inputGroup}>
+              <Home size={20} color="#6b7280" style={styles.icon} />
+              <TextInput 
+                style={styles.input} 
+                placeholder="Room Number (e.g. 101)" 
+                value={roomNum} 
+                onChangeText={setRoomNum} 
+              />
             </View>
 
             <View style={styles.inputGroup}>
               <Phone size={20} color="#6b7280" style={styles.icon} />
-              <TextInput style={styles.input} placeholder="Contact Number" value={contactNumber} onChangeText={setContactNumber} keyboardType="phone-pad" />
+              <TextInput 
+                style={styles.input} 
+                placeholder="Contact Number" 
+                value={contactNumber} 
+                onChangeText={setContactNumber} 
+                keyboardType="phone-pad" 
+              />
             </View>
           </>
         )}
